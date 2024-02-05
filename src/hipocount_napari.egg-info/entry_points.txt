@@ -1,0 +1,2 @@
+[napari.manifest]
+hipocount-napari = hipocount_napari:napari.yaml

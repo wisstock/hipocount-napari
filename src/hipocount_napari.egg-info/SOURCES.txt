@@ -1,0 +1,13 @@
+LICENSE
+README.md
+pyproject.toml
+setup.cfg
+src/hipocount_napari/__init__.py
+src/hipocount_napari/_widget.py
+src/hipocount_napari/napari.yaml
+src/hipocount_napari.egg-info/PKG-INFO
+src/hipocount_napari.egg-info/SOURCES.txt
+src/hipocount_napari.egg-info/dependency_links.txt
+src/hipocount_napari.egg-info/entry_points.txt
+src/hipocount_napari.egg-info/requires.txt
+src/hipocount_napari.egg-info/top_level.txt
