@@ -11,7 +11,7 @@ contributions:
       title: GLT dots masking
       python_name: hipocount_napari._widget:otsu_dots_masking
     - id: hipocount-napari.glt_count_widget
-      title: GLT conunt
+      title: GLT conunt in pyramid layer
       python_name: hipocount_napari._widget:glt_count
   widgets:
     - command: hipocount-napari.stack_process_widget

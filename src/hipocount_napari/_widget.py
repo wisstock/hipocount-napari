@@ -7,6 +7,7 @@ from napari.utils.notifications import show_info
 
 import pathlib
 import os
+import pandas as pd
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -16,11 +17,6 @@ from skimage import filters
 from skimage.filters import rank
 from skimage import morphology
 from skimage import measure
-
-# import vispy.color
-
-# import matplotlib.pyplot as plt
-# from matplotlib.backends.backend_qt5agg import FigureCanvas
 
 
 def _save_img(viewer: Viewer, img:np.ndarray, img_name:str):
@@ -36,7 +32,7 @@ def _save_img(viewer: Viewer, img:np.ndarray, img_name:str):
                reference_processing={"choices": ['MIP', 'average']},
                target_processing={"choices": ['MIP', 'average']},)
 def stack_process(viewer: Viewer, img:Image,
-                  gaussian_blur:bool=False, gaussian_sigma=0.25,
+                  gaussian_blur:bool=False, gaussian_sigma=0.15,
                   reference_channel:str='Ch.1',
                   reference_processing:str='average',
                   target_processing:str='MIP'):
@@ -90,11 +86,11 @@ def pyramid_masking(viewer:Viewer, img:Image,
     mask_name = img.name + '_pyramid-mask'
     try:
         viewer.layers[mask_name].data = mask_pyramid.astype(bool)
-    except KeyError:
+    except KeyError or ValueError:
         viewer.add_labels(mask_pyramid.astype(bool), name=mask_name,
                           num_colors=1, color={1:(255,0,0,255)},
                           opacity=0.5)
-        
+
 
 @magic_factory(call_button='Mask dots')
 def otsu_dots_masking(viewer:Viewer, img:Image, filter_mask:Labels,
@@ -111,42 +107,57 @@ def otsu_dots_masking(viewer:Viewer, img:Image, filter_mask:Labels,
     mask_name = img.name + '_dots'
     try:
         viewer.layers[mask_name].data = glt_mask
-    except KeyError:
+    except KeyError or ValueError:
         viewer.add_labels(glt_mask, name=mask_name,
                           num_colors=1, color={1:(0,0,255,255)},
                           opacity=1)
 
 
-@magic_factory(call_button='Count GLT')
-def glt_count(glt_img:Image, glt_mask:Labels,
-              save_data_frame:bool=True, saving_path:pathlib.Path = os.getcwd()):
+@magic_factory(call_button='Count GLT in pyramid layer')
+def glt_count(glt_img:Image, glt_mask:Labels, pyramid_mask:Labels,
+              save_data_frame:bool=False, saving_path:pathlib.Path = os.getcwd()):
     
     img = glt_img.data[1]
     mask = glt_mask.data.astype(np.bool_)
+    p_mask = pyramid_mask.data.astype(np.bool_)
+
     results_dict = {}
     results_dict.update({'sample':glt_img.name})
 
-    intensity = np.sum(img, where=mask)
-    results_dict.update({'intensity':intensity})
+    intensity = int(np.sum(img, where=mask))
+    p_intensity = int(np.sum(img, where=p_mask))
+    relative_intensity = intensity / p_intensity
+    results_dict.update({'dots_intensity':intensity})
+    results_dict.update({'layer_intensity':p_intensity})
+    results_dict.update({'relative_intensity':relative_intensity})
+
+    glt_area = int(np.sum(mask))
+    pyramid_area = int(np.sum(p_mask))
+    relative_area = glt_area/pyramid_area
+    results_dict.update({'dots_area':glt_area})
+    results_dict.update({'layer_area':pyramid_area})
+    if glt_area == pyramid_area:
+        results_dict.update({'relative_area':'NA'})
+    else:
+        results_dict.update({'relative_area':relative_area})
 
     label,label_n = ndi.label(mask)
     if label_n == 1:
-        results_dict.update({'area':'NA'})
-        results_dict.update({'number':'NA'})
+        results_dict.update({'dots_number':'NA'})
         results_dict.update({'glt_mask':'area'})
     else:
-        results_dict.update({'area':np.sum(mask)})
-        results_dict.update({'number':label_n})
+        
+        results_dict.update({'dots_number':int(label_n)})
         results_dict.update({'glt_mask':'dots'})
 
+    results_df = pd.DataFrame(results_dict, index=[0])
+
+    pd.set_option('display.max_columns', None)
+    print(results_df)
+
     if save_data_frame:
-        import pandas as pd
         df_name = glt_img.name
-        results_df = pd.DataFrame(results_dict, index=[0])
-        print(results_df)
         results_df.to_csv(os.path.join(saving_path, df_name+'.csv'))
-    else:
-        print(results_dict)
 
 
 if __name__ == '__main__':
