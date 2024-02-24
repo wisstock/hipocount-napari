@@ -4,7 +4,9 @@ import napari
 from napari import Viewer
 from napari.layers import Image, Labels
 from napari.utils.notifications import show_info
+from napari.qt.threading import thread_worker
 
+import warnings
 import pathlib
 import os
 import pandas as pd
@@ -27,32 +29,47 @@ def _save_img(viewer: Viewer, img:np.ndarray, img_name:str):
         viewer.add_image(img, name=img_name, colormap='turbo')
 
 
+def _get_labels_values(labels_data):
+    labels_props = measure.regionprops(label_image=labels_data)
+    label_values = []
+    for prop in labels_props:
+        label_values.append(prop['label'])
+    return label_values
+
+
+def _get_labels_color(labels_data):
+    colors_values = _get_labels_values(labels_data)
+    labels_layer = Labels(labels_data)
+    colors = labels_layer.get_color(colors_values)
+    return colors
+
+
 @magic_factory(call_button='Preprocess z-stack',
-               reference_channel={"choices": ['Ch.0', 'Ch.1']},
-               reference_processing={"choices": ['MIP', 'average']},
-               target_processing={"choices": ['MIP', 'average']},)
+               reference_ch={"choices": ['Ch.0', 'Ch.1']},
+               reference_ch_processing={"choices": ['MIP', 'average']},
+               target_ch_processing={"choices": ['MIP', 'average']},)
 def stack_process(viewer: Viewer, img:Image,
                   gaussian_blur:bool=False, gaussian_sigma=0.15,
-                  reference_channel:str='Ch.1',
-                  reference_processing:str='average',
-                  target_processing:str='MIP'):
+                  reference_ch:str='Ch.1',
+                  reference_ch_processing:str='average',
+                  target_ch_processing:str='MIP'):
     if input is not None:
         series_dim = img.data.ndim
         if series_dim == 4:
            
-            if reference_channel == 'Ch.0':
+            if reference_ch == 'Ch.0':
                 ref_index, tar_index = 0, 1
-            elif reference_channel == 'Ch.1':
+            elif reference_ch == 'Ch.1':
                 ref_index, tar_index = 1, 0
 
-            if reference_processing == 'MIP':
+            if reference_ch_processing == 'MIP':
                 ref_img = np.max(img.data[ref_index], axis=0)
-            elif reference_processing == 'average':
+            elif reference_ch_processing == 'average':
                 ref_img = np.mean(img.data[ref_index], axis=0)
 
-            if target_processing == 'MIP':
+            if target_ch_processing == 'MIP':
                 tar_img = np.max(img.data[tar_index], axis=0)
-            elif target_processing == 'average':
+            elif target_ch_processing == 'average':
                 tar_img = np.mean(img.data[tar_index], axis=0)
             
             if gaussian_blur:
@@ -84,37 +101,76 @@ def pyramid_masking(viewer:Viewer, img:Image,
     mask_pyramid = morphology.binary_dilation(mask_pyramid, footprint=morphology.disk(mask_extention))
 
     mask_name = img.name + '_pyramid-mask'
+    warnings.filterwarnings('ignore')
     try:
         viewer.layers[mask_name].data = mask_pyramid.astype(bool)
     except KeyError or ValueError:
         viewer.add_labels(mask_pyramid.astype(bool), name=mask_name,
                           num_colors=1, color={1:(255,0,0,255)},
                           opacity=0.5)
+        
+
+@magic_factory(call_button='Mask astrocytes')
+def astrocytes_masking(viewer:Viewer, img:Image,
+                       min_size:int=10,
+                       cells_extention:int=3):
+    mask_name = img.name + '_astrocytes-mask'
+    def update_astro_mask(mask):
+        warnings.filterwarnings('ignore')
+        try:
+            viewer.layers[mask_name].data = mask
+        except KeyError or ValueError:
+            viewer.add_labels(mask, name=mask_name,
+                            num_colors=1, color={1:(0,0,255,255)},
+                            opacity=0.5)
+            
+    @thread_worker(connect={'yielded': update_astro_mask})
+    def _astrocytes_masking():
+        ref_img = img.data[0]
+
+        astro_th = filters.threshold_otsu(ref_img)
+        mask_astro_raw = ref_img > astro_th
+        mask_astro = morphology.opening(mask_astro_raw, footprint=morphology.disk(min_size))
+        mask_astro = morphology.dilation(mask_astro, footprint=morphology.disk(cells_extention))
+        lable_astro = measure.label(mask_astro)
+        yield lable_astro
+
+    _astrocytes_masking()
 
 
 @magic_factory(call_button='Mask dots')
 def otsu_dots_masking(viewer:Viewer, img:Image, filter_mask:Labels,
-                      otsu_footprint_size:int=10,
+                      otsu_footprint_size:int=50,
                       filter_by_mask:bool=True):
-    glt_img = img.data[1]
-    glt_th = rank.otsu(glt_img, footprint=morphology.disk(otsu_footprint_size))
-    glt_mask = glt_img > glt_th
-    glt_mask = morphology.opening(glt_mask, footprint=morphology.disk(1))
-
-    if filter_by_mask:
-        glt_mask[~filter_mask.data.astype(np.bool_)] = False
-
     mask_name = img.name + '_dots'
-    try:
-        viewer.layers[mask_name].data = glt_mask
-    except KeyError or ValueError:
-        viewer.add_labels(glt_mask, name=mask_name,
-                          num_colors=1, color={1:(0,0,255,255)},
-                          opacity=1)
+
+    def update_dots_mask(mask):
+        warnings.filterwarnings('ignore')
+        try:
+            viewer.layers[mask_name].data = mask
+        except KeyError or ValueError:
+            viewer.add_labels(mask, name=mask_name,
+                            num_colors=1, color={1:(0,0,255,255)},
+                            opacity=0.5)
+
+    @thread_worker(connect={'yielded': update_dots_mask})
+    def _otsu_dots_masking():
+        glt_img = img.data[1]
+        glt_th = rank.otsu(glt_img, footprint=morphology.disk(otsu_footprint_size))
+        glt_mask = glt_img > glt_th
+        glt_mask = morphology.opening(glt_mask, footprint=morphology.disk(1))
+
+        if filter_by_mask:
+            glt_mask[~filter_mask.data.astype(np.bool_)] = False
+            yield glt_mask
+        else:
+            yield glt_mask
+
+    _otsu_dots_masking()
 
 
 @magic_factory(call_button='Count GLT in pyramid layer')
-def glt_count(glt_img:Image, glt_mask:Labels, pyramid_mask:Labels,
+def pyramid_glt_count(glt_img:Image, glt_mask:Labels, pyramid_mask:Labels,
               save_data_frame:bool=False, saving_path:pathlib.Path = os.getcwd()):
     
     img = glt_img.data[1]
