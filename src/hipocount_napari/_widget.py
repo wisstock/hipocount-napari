@@ -19,7 +19,8 @@ from skimage import filters
 from skimage.filters import rank
 from skimage import morphology
 from skimage import measure
-
+from skimage import exposure
+from skimage import util
 
 def _save_img(viewer: Viewer, img:np.ndarray, img_name:str):
     try: 
@@ -45,13 +46,11 @@ def _get_labels_color(labels_data):
 
 
 @magic_factory(call_button='Preprocess z-stack',
-               reference_ch={"choices": ['Ch.0', 'Ch.1']},
-               reference_ch_processing={"choices": ['MIP', 'average']},
+               reference_ch={"choices": ['Ch.0', 'Ch.1']},  # reference_ch_processing={"choices": ['MIP', 'average']},
                target_ch_processing={"choices": ['MIP', 'average']},)
 def stack_process(viewer: Viewer, img:Image,
-                  gaussian_blur:bool=False, gaussian_sigma=0.15,
-                  reference_ch:str='Ch.1',
-                  reference_ch_processing:str='average',
+                  reference_ch:str='Ch.1',  # reference_ch_processing:str='average',
+                  reference_ch_gaussian_blur:bool=True, gaussian_sigma=0.75,
                   target_ch_processing:str='MIP'):
     if input is not None:
         series_dim = img.data.ndim
@@ -62,28 +61,35 @@ def stack_process(viewer: Viewer, img:Image,
             elif reference_ch == 'Ch.1':
                 ref_index, tar_index = 1, 0
 
-            if reference_ch_processing == 'MIP':
-                ref_img = np.max(img.data[ref_index], axis=0)
-            elif reference_ch_processing == 'average':
-                ref_img = np.mean(img.data[ref_index], axis=0)
+            # if reference_ch_processing == 'MIP':
+            #     ref_img = np.max(img.data[ref_index], axis=0)
+            # elif reference_ch_processing == 'average':
+            #     ref_img = np.mean(img.data[ref_index], axis=0)
 
-            if target_ch_processing == 'MIP':
-                tar_img = np.max(img.data[tar_index], axis=0)
-            elif target_ch_processing == 'average':
-                tar_img = np.mean(img.data[tar_index], axis=0)
-            
-            if gaussian_blur:
+            ref_img_raw = np.copy(img.data[ref_index])
+            ref_img = np.mean(ref_img_raw, axis=0)
+            # if reference_ch_enhance:
+            #     p2, p98 = np.percentile(ref_img, (2, 98))
+            #     ref_img = exposure.rescale_intensity(ref_img, in_range=(p2, p98))
+            if reference_ch_gaussian_blur:
                 ref_img = filters.gaussian(ref_img, sigma=gaussian_sigma)
-                # tar_img = filters.gaussian(tar_img, sigma=gaussian_sigma)
 
-            img_processed = np.stack([ref_img.astype(np.uint16), tar_img.astype(np.uint16)], axis=0)
-            # img_name = img.name + '_projection'
-            _save_img(viewer=viewer, img=img_processed, img_name=img.name)
+            tar_img_raw = np.copy(img.data[tar_index])
+            if target_ch_processing == 'MIP':
+                tar_img = np.max(tar_img_raw, axis=0)
+            elif target_ch_processing == 'average':
+                tar_img = np.mean(tar_img_raw, axis=0)
+
+            # ref_img = exposure.rescale_intensity(ref_img, in_range='dtype')
+            # tar_img = exposure.rescale_intensity(tar_img, in_range=(0, 1))
+
+            _save_img(viewer=viewer, img=tar_img, img_name=img.name + '_target')
+            _save_img(viewer=viewer, img=ref_img, img_name=img.name + '_ref')
         else:
             raise ValueError('The input image should have 4 dimensions!')
         
 @magic_factory(call_button='Mask somas')
-def pyramid_masking(viewer:Viewer, img:Image,
+def pyramid_masking(viewer:Viewer, pyramid_img:Image,
                     soma_extention:int=5,
                     mask_extention:int=5):
     def select_large_mask(raw_mask):
@@ -92,7 +98,7 @@ def pyramid_masking(viewer:Viewer, img:Image,
         larger_mask = element_label == element_area[max(element_area.keys())]
         return larger_mask
     
-    ref_img = img.data[0]
+    ref_img = pyramid_img.data
 
     neurons_th = filters.threshold_otsu(ref_img)
     mask_somas_raw = ref_img > neurons_th
@@ -111,38 +117,52 @@ def pyramid_masking(viewer:Viewer, img:Image,
         
 
 @magic_factory(call_button='Mask astrocytes')
-def astrocytes_masking(viewer:Viewer, img:Image,
-                       min_size:int=10,
-                       cells_extention:int=3):
-    mask_name = img.name + '_astrocytes-mask'
+def astrocytes_masking(viewer:Viewer, astrocyte_img:Image,
+                       otsu_footprint_size:float=100,
+                       filter_by_size:bool=False,
+                       min_size:float=50.0,
+                       cells_extention:int=0):
+    mask_name = astrocyte_img.name + '_astrocytes-mask'
     def update_astro_mask(mask):
         warnings.filterwarnings('ignore')
         try:
             viewer.layers[mask_name].data = mask
         except KeyError or ValueError:
-            viewer.add_labels(mask, name=mask_name,
-                            num_colors=1, color={1:(0,0,255,255)},
-                            opacity=0.5)
+            viewer.add_labels(mask, name=mask_name, opacity=0.5)
             
     @thread_worker(connect={'yielded': update_astro_mask})
     def _astrocytes_masking():
-        ref_img = img.data[0]
+        ref_img = exposure.rescale_intensity(astrocyte_img.data.astype(float))
+        # ref_img_adj = exposure.equalize_adapthist(ref_img, clip_limit=clip_lim)
+        # mask_raw = ref_img > filters.threshold_otsu(ref_img_adj)
 
-        astro_th = filters.threshold_otsu(ref_img)
-        mask_astro_raw = ref_img > astro_th
-        mask_astro = morphology.opening(mask_astro_raw, footprint=morphology.disk(min_size))
-        mask_astro = morphology.dilation(mask_astro, footprint=morphology.disk(cells_extention))
-        lable_astro = measure.label(mask_astro)
-        yield lable_astro
+        ref_th = rank.otsu(ref_img, footprint=morphology.disk(otsu_footprint_size))
+        mask_raw = ref_img > ref_th
+
+        label_raw = measure.label(mask_raw)
+        if filter_by_size:
+            label_area = {element.label : element.area for element in measure.regionprops(label_raw)}
+            filtered_mask = np.zeros_like(label_raw)
+            for label_key in label_area.keys():
+                if label_area[label_key] >= int(min_size * 1000):
+                    filtered_mask[label_raw == label_key] = 1
+            if cells_extention > 0:
+                filtered_mask = morphology.dilation(filtered_mask, footprint=morphology.disk(cells_extention))
+            label_astro = measure.label(filtered_mask)
+        else:
+            label_astro = label_raw
+
+        print(f'Detected {np.max(label_astro)} astrocytes')
+        yield label_astro
 
     _astrocytes_masking()
 
 
 @magic_factory(call_button='Mask dots')
-def otsu_dots_masking(viewer:Viewer, img:Image, filter_mask:Labels,
+def otsu_dots_masking(viewer:Viewer, dots_img:Image, filter_mask:Labels,
                       otsu_footprint_size:int=50,
                       filter_by_mask:bool=True):
-    mask_name = img.name + '_dots'
+    mask_name = dots_img.name + '_dots'
 
     def update_dots_mask(mask):
         warnings.filterwarnings('ignore')
@@ -155,7 +175,7 @@ def otsu_dots_masking(viewer:Viewer, img:Image, filter_mask:Labels,
 
     @thread_worker(connect={'yielded': update_dots_mask})
     def _otsu_dots_masking():
-        glt_img = img.data[1]
+        glt_img = dots_img.data
         glt_th = rank.otsu(glt_img, footprint=morphology.disk(otsu_footprint_size))
         glt_mask = glt_img > glt_th
         glt_mask = morphology.opening(glt_mask, footprint=morphology.disk(1))
@@ -173,7 +193,7 @@ def otsu_dots_masking(viewer:Viewer, img:Image, filter_mask:Labels,
 def pyramid_glt_count(glt_img:Image, glt_mask:Labels, pyramid_mask:Labels,
               save_data_frame:bool=False, saving_path:pathlib.Path = os.getcwd()):
     
-    img = glt_img.data[1]
+    img = glt_img.data
     mask = glt_mask.data.astype(np.bool_)
     p_mask = pyramid_mask.data.astype(np.bool_)
 
