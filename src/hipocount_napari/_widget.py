@@ -19,7 +19,6 @@ from skimage import filters
 from skimage.filters import rank
 from skimage import morphology
 from skimage import measure
-from skimage import exposure
 
 
 def _save_img(viewer: Viewer, img:np.ndarray, img_name:str):
@@ -109,14 +108,11 @@ def pyramid_masking(viewer:Viewer, pyramid_img:Image,
                           opacity=0.5)
         
 
-@magic_factory(call_button='Mask astrocytes')
+@magic_factory(call_button='Mask astrocytes',)
 def astrocytes_masking(viewer:Viewer, astrocyte_img:Image,
-                       kernel_size:int=2,
-                       otsu_footprint_size:int=500,
-                       footprint_1_size:int=2,
-                       footprint_2_size:int=0,
-                       min_size:int=200,
-                       cells_extention:int=0):
+                       otsu_footprint_size:int=5,
+                       mask_dilation:int=2,
+                       min_area_10x:int=50):
     mask_name = astrocyte_img.name + '_astrocytes-mask'
     def update_astro_mask(mask):
         warnings.filterwarnings('ignore')
@@ -130,37 +126,51 @@ def astrocytes_masking(viewer:Viewer, astrocyte_img:Image,
         tic = timer()
 
         ref_img = astrocyte_img.data
-        if kernel_size != 0:
-            ref_img = filters.median(ref_img, footprint=morphology.disk(kernel_size))
+
+        high_mask = ref_img > filters.threshold_otsu(ref_img)
 
         gfap_th = rank.otsu(ref_img, footprint=morphology.disk(otsu_footprint_size))
-        mask_raw = ref_img > gfap_th
-        mask_raw = morphology.dilation(mask_raw, footprint=morphology.disk(footprint_1_size))
-        mask_raw = morphology.erosion(mask_raw, footprint=morphology.disk(footprint_2_size))
+        low_mask = ref_img > gfap_th
 
-        if min_size != 0:
-            filter_lab = measure.label(mask_raw)
-            for lab_prop in measure.regionprops(filter_lab):
-                if lab_prop.area < min_size or lab_prop.area > 100000:
-                    filter_lab[filter_lab == lab_prop.label] = 0
-            mask_raw = filter_lab != 0
+        filter_lab, filter_lab_num = ndi.label(low_mask)
+        hyst_img =  ndi.sum(high_mask, filter_lab, np.arange(filter_lab_num + 1))
+        connected_mask = hyst_img > 0
+        debris_mask = connected_mask[filter_lab]
+        debris_mask = morphology.erosion(debris_mask, footprint=morphology.disk(5))
 
-        if cells_extention > 0:
-            mask_raw = morphology.dilation(mask_raw, footprint=morphology.disk(cells_extention))
-        mask_raw = ndi.binary_fill_holes(mask_raw)
+        astro_mask = np.copy(low_mask)
+        astro_mask[~debris_mask] = 0
 
-        label_astro = measure.label(mask_raw)
+        if mask_dilation != 0:
+            astro_mask = morphology.dilation(astro_mask, footprint=morphology.disk(mask_dilation))
+
+        if min_area_10x != 0:
+            inter_mask = np.zeros_like(astro_mask)
+            inter_lab, inter_lab_num = ndi.label(astro_mask)
+            show_info(f'{astrocyte_img.name}: Filtering start: {inter_lab_num} labels')
+
+            for inter_region in measure.regionprops(inter_lab):
+                inter_region_mask = inter_lab == inter_region.label
+                inter_region_area = np.sum(inter_region_mask, dtype=ref_img.dtype)
+                # inter_region_val = np.mean(ref_img, where=inter_region_mask, dtype=ref_img.dtype)
+                # inter_region_ratio = inter_region_val / inter_region_area
+
+                if inter_region_area >= int(min_area_10x*10):
+                    inter_mask[inter_region_mask] = 1
+            astro_mask = inter_mask
+
+        astro_label = measure.label(astro_mask)
         tok = timer()
 
-        show_info(f'{astrocyte_img.name}: detected {np.max(label_astro)} astrocytes in {round(tok - tic,1)}s')
-        yield label_astro
+        show_info(f'{astrocyte_img.name}: Detected {np.max(astro_label)} astrocytes in {round(tok - tic,1)}s')
+        yield astro_label
 
     _astrocytes_masking()
 
 
 @magic_factory(call_button='Mask dots')
 def otsu_dots_masking(viewer:Viewer, dots_img:Image, filter_mask:Labels,
-                      otsu_footprint_size:int=50,
+                      otsu_footprint_size:int=10,
                       filter_by_mask:bool=True):
     mask_name = dots_img.name + '_dots'
 
@@ -233,6 +243,70 @@ def pyramid_glt_count(glt_img:Image, glt_mask:Labels, pyramid_mask:Labels,
     if save_data_frame:
         df_name = glt_img.name
         results_df.to_csv(os.path.join(saving_path, df_name+'.csv'))
+
+
+@magic_factory(call_button='Count GLT in astrocytes')
+def astro_glt_count(glt_img:Image, glt_mask:Labels, astrocyte_mask:Labels, group:str='Group 1',
+                    saving_path:pathlib.Path = os.getcwd()):
+    g_img = glt_img.data
+    g_mask = glt_mask.data
+    a_mask = astrocyte_mask.data
+
+    if g_img.ndim != 2 or g_mask.ndim != 2 or a_mask.ndim != 2:
+        raise ValueError('Incorrect input data shape!')
+    
+    output_data_frame = pd.DataFrame({'id':[],
+                                      'group':[],
+                                      'cell_num':[],
+                                      'cell_area':[],
+                                      'dot_num':[],
+                                      'dot_area':[],
+                                      'dot_rel_area':[],
+                                      'dot_sum_int':[],
+                                      'dot_mean_int':[],
+                                      'dot_men_int_per_dot':[],
+                                      'dot_mean_int_dens':[]})
+    
+    for a_region in measure.regionprops(a_mask):
+        one_a_mask = a_mask == a_region.label
+        
+        one_g_mask = np.copy(g_mask)
+        one_g_mask = one_g_mask != 0
+        one_g_mask[~one_a_mask] = 0
+
+        one_cell_area = np.sum(one_a_mask)
+
+        one_dot_area = np.sum(one_g_mask)
+        one_dot_rel_area = one_dot_area / one_cell_area
+
+        one_dot_lab, one_dot_num = ndi.label(one_g_mask)
+
+        one_dot_int_dens_list = []
+        for dot_lab_num in range(one_dot_lab.max()):
+            one_dot_mask = one_dot_lab == dot_lab_num
+            one_dot_int_dens_list.append(np.sum(g_img, where=one_dot_mask) / np.sum(one_dot_mask))
+        one_dot_mean_int_dens = np.mean(np.array(one_dot_int_dens_list))
+
+        one_dot_sum_int = np.sum(g_img, where=one_g_mask)
+        one_dot_mean_int = np.mean(g_img, where=one_g_mask)
+
+        cell_row = [glt_img.name,                        # id
+                    group,                               # group
+                    a_region.label,                      # cell_num
+                    one_cell_area,                       # cell_area
+                    one_dot_num,                         # dot_num
+                    one_dot_area,                        # dot_area
+                    round(one_dot_rel_area, 3),          # dot_rel_area
+                    one_dot_sum_int,                     # dot_sum_int
+                    int(one_dot_mean_int),               # dot_mean_int
+                    int(one_dot_sum_int / one_dot_num),  # dot_men_int_per_dot
+                    int(one_dot_mean_int_dens)]          # dot_mean_int_dens
+
+
+        output_data_frame.loc[len(output_data_frame.index)] = cell_row
+    
+    output_data_frame.to_csv(os.path.join(saving_path, f'{glt_img.name}_glt_in_astro.csv'))
+    show_info(f'{glt_img.name}: Astrocytes data frame saved')
 
 
 if __name__ == '__main__':

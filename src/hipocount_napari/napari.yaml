@@ -16,6 +16,9 @@ contributions:
     - id: hipocount-napari.pyramid_glt_count_widget
       title: GLT conunt in pyramid layer
       python_name: hipocount_napari._widget:pyramid_glt_count
+    - id: hipocount-napari.astro_glt_count_widget
+      title: GLT conunt in astrocytes
+      python_name: hipocount_napari._widget:astro_glt_count
   widgets:
     - command: hipocount-napari.stack_process_widget
       display_name: Preprocessing
@@ -26,4 +29,6 @@ contributions:
     - command: hipocount-napari.otsu_dots_masking_widget
       display_name: GLT dots masking
     - command: hipocount-napari.pyramid_glt_count_widget
-      display_name: GLT conut
+      display_name: GLT conut in pyramid
+    - command: hipocount-napari.astro_glt_count_widget
+      display_name: GLT conut in astrocytes
